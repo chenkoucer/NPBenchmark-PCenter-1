@@ -195,9 +195,35 @@ public:
     bool check(Length &obj) const;
     void record() const; // save running log.
 
+private:
+    int INF = INT32_MAX;
+    int kClosed = 120;
+    double cur_maxLength = 0;
+    double hist_maxLength = INF;
+    int nodeNum;
+    int edgeNum;
+    int centerNum;
+    //int step_tenure = 10;
+    std::vector<int> facility_tenure;
+    std::vector<int> user_tenure;
+    std::vector<bool> isServerdNode;
+    std::vector<int> temp_centers;
+    std::vector<int> hist_centers;
+    int base_user_tabu_steps_;
+    int base_facility_tabu_steps_;
 protected:
     void init();
     bool optimize(Solution &sln, ID workerId = 0); // optimize by a single worker.
+    std::vector<std::vector<int>> fTable, dTable;
+    void addNodeToTable(int node);//增加服务节点并更行f表和d表
+    void deleteNodeInTable(int node);//删除服务节点并更新f表和d表
+    void findNext(int v);//寻找次近服务节点并更新f表和d表
+    int selectNextSeveredNode();//选择服务节点
+    std::vector<int> findSeveredNodeNeighbourhood();//选择服务节点
+    std::vector<int> sortIndexes(int k_closed_of_v, int k, int length);//返回前k个最小值对应的索引值
+    std::vector<int> findPair(const std::vector<int> &alternativeNode, int t);//返回(f,v)f为增加的节点，v为删除的节点
+    void assign_(std::vector<int>& vec, int adj);
+
     #pragma endregion Method
 
     #pragma region Field
@@ -208,7 +234,7 @@ public:
     struct { // auxiliary data for solver.
         double objScale;
 
-        Arr2D<Length> adjMat; // adjMat[i][j] is the distance of the edge which goes from i to j.
+        Arr2D<int> adjMat; // adjMat[i][j] is the distance of the edge which goes from i to j.
         Arr<Length> coverRadii; // coverRadii[n] is the length of its shortest serve arc.
     } aux;
 

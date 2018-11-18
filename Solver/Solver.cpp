@@ -176,6 +176,7 @@ bool Solver::solve() {
     for (int i = 0; i < workerNum; ++i) {
         if (!success[i]) { continue; }
         Log(LogSwitch::Szx::Framework) << "worker " << i << " got " << solutions[i].coverRadius << endl;
+        //cout << "coverRadius:" << solutions[i].coverRadius << "   bestValue:" << bestValue << endl;
         if (solutions[i].coverRadius >= bestValue) { continue; }
         bestIndex = i;
         bestValue = solutions[i].coverRadius;
@@ -258,7 +259,16 @@ bool Solver::check(Length &checkerObj) const {
 }
 
 void Solver::init() {
-    ID nodeNum = input.graph().nodenum();
+    
+    //initialize the graph information
+    nodeNum = input.graph().nodenum();
+    centerNum = input.centernum();
+    
+    //initialize the tabu information
+    facility_tenure.assign(nodeNum, 0);
+    user_tenure.assign(nodeNum, 0);
+    base_user_tabu_steps_ = centerNum / 10;
+    base_facility_tabu_steps_ = (nodeNum - centerNum) / 10;
 
     aux.adjMat.init(nodeNum, nodeNum);
     fill(aux.adjMat.begin(), aux.adjMat.end(), Problem::MaxDistance);
@@ -284,7 +294,7 @@ void Solver::init() {
             double nx = input.graph().nodes(n).x();
             double ny = input.graph().nodes(n).y();
             for (ID m = 0; m < nodeNum; ++m) {
-                if (n == m) { continue; }
+                if (n == m) { aux.adjMat.at(n, m) = 0; continue; }
                 aux.adjMat.at(n, m) = static_cast<Length>(aux.objScale * hypot(
                     nx - input.graph().nodes(m).x(), ny - input.graph().nodes(m).y()));
             }
@@ -298,32 +308,252 @@ void Solver::init() {
 bool Solver::optimize(Solution &sln, ID workerId) {
     Log(LogSwitch::Szx::Framework) << "worker " << workerId << " starts." << endl;
 
-    ID nodeNum = input.graph().nodenum();
-    ID centerNum = input.centernum();
-
+    
+    cout << "nodeNum" << nodeNum << "     centerNum" << centerNum << endl;
     // reset solution state.
     bool status = true;
     auto &centers(*sln.mutable_centers());
     centers.Resize(centerNum, Problem::InvalidId);
-
     // TODO[0]: replace the following random assignment with your own algorithm.
-    Sampling sampler(rand, centerNum);
-    for (ID n = 0; !timer.isTimeOut() && (n < nodeNum); ++n) {
-        ID center = sampler.replaceIndex();
-        if (center >= 0) { centers[center] = n; }
-    }
+    //Sampling sampler(rand, centerNum);
+    //for (ID n = 0; !timer.isTimeOut() && (n < nodeNum); ++n) {
+    //    ID center = sampler.replaceIndex();
+    //    if (center >= 0) { centers[center] = n; }
+    //}
+    //
+    //sln.coverRadius = 0; // record obj.
+    //for (ID n = 0; n < nodeNum; ++n) {
+    //    for (auto c = centers.begin(); c != centers.end(); ++c) {
+    //        if (aux.adjMat.at(n, *c) < aux.coverRadii[n]) { aux.coverRadii[n] = aux.adjMat.at(n, *c); }
+    //    }
+    //    if (sln.coverRadius < aux.coverRadii[n]) { sln.coverRadius = aux.coverRadii[n]; }
+    //}
 
-    sln.coverRadius = 0; // record obj.
-    for (ID n = 0; n < nodeNum; ++n) {
-        for (auto c = centers.begin(); c != centers.end(); ++c) {
-            if (aux.adjMat.at(n, *c) < aux.coverRadii[n]) { aux.coverRadii[n] = aux.adjMat.at(n, *c); }
+    for (int i = 0; i < 1; ++i) {
+        facility_tenure.assign(nodeNum, 0);
+        user_tenure.assign(nodeNum, 0);
+        isServerdNode.assign(nodeNum, false);
+        int index = rand.pick(nodeNum);
+        dTable.assign(2, vector<int>(nodeNum, INF));
+        fTable.assign(2, vector<int>(nodeNum, -1));
+        temp_centers.clear();
+        temp_centers.push_back(index);
+        isServerdNode[index] = true;
+        fTable[0].assign(nodeNum, index);
+        assign_(dTable[0], index);
+        for (int f = 1; f < centerNum; ++f) {//从初始节点开始，依次构造服务节点
+            int serverNode = selectNextSeveredNode();
+            addNodeToTable(serverNode);
+            //cout << "serverNode:  " << serverNode << "   cur_maxLength:" << cur_maxLength << endl;
         }
-        if (sln.coverRadius < aux.coverRadii[n]) { sln.coverRadius = aux.coverRadii[n]; }
-    }
 
+        int per_count = 0, per_range = 1500;
+        for (int t = 0; !timer.isTimeOut() && t <20000; ++t) {
+            vector<int> switchNodes = findSeveredNodeNeighbourhood();//待增添节点
+            vector<int> switchNodePair = findPair(switchNodes, t);//交换节点对，若存在相同的Mf则随机返回一对
+            int f, v;
+            if (switchNodePair.size() == 0 || per_count > per_range) {
+                while (isServerdNode[f = rand.pick(nodeNum)]);
+                v = temp_centers[rand.pick(centerNum)];
+                per_count = 0;
+            } else {
+                f = switchNodePair[0], v = switchNodePair[1];
+            }
+            per_count++;
+            addNodeToTable(f);
+            deleteNodeInTable(v);
+            if (cur_maxLength < hist_maxLength) {// updtae the history optimal solution
+                hist_maxLength = cur_maxLength;
+                hist_centers = temp_centers;
+                per_count = 0;
+                cout << "serverNode:  " << f << "hist_maxLength:" << hist_maxLength << "  cur_maxLength: " << cur_maxLength << "  t: " << i * 1000 + t << endl;
+            }
+            user_tenure[f] = t + base_user_tabu_steps_ + rand() % 10;
+            facility_tenure[v] = t + base_facility_tabu_steps_ + rand() % 100;
+        }
+    }
+    for (int i = 0; i < hist_centers.size(); ++i) {
+        centers[i] = hist_centers[i];
+    }
+    sln.coverRadius = hist_maxLength;
+    cout << "maxLength after change: " << hist_maxLength << endl;
+    cout << "the result takes: " << timer.elapsedSeconds() << " seconds." << endl;
     Log(LogSwitch::Szx::Framework) << "worker " << workerId << " ends." << endl;
     return status;
 }
+void Solver::addNodeToTable(int node) {
+    isServerdNode[node] = true;
+    cur_maxLength = 0;
+    temp_centers.push_back(node);
+    isServerdNode[node] = true;
+    for (int v = 0; v < nodeNum; ++v) {//更新f表和t表
+        if (aux.adjMat[node][v] < dTable[0][v]) {
+            dTable[1][v] = dTable[0][v];
+            dTable[0][v] = aux.adjMat[node][v];
+            fTable[1][v] = fTable[0][v];
+            fTable[0][v] = node;
+        } else if (aux.adjMat[node][v] < dTable[1][v]) {
+            dTable[1][v] = aux.adjMat[node][v];
+            fTable[1][v] = node;
+        }
+        if (dTable[0][v] > cur_maxLength)
+            cur_maxLength = dTable[0][v];
+    }
+}
+void Solver::deleteNodeInTable(int node) {
+    isServerdNode[node] = false;
+    cur_maxLength = 0;
+    int i = 0;
+    for (; i < temp_centers.size() && temp_centers[i] != node; ++i);//寻找要删除的服务节点
+    for (; i < temp_centers.size() - 1; ++i) {
+        temp_centers[i] = temp_centers[i + 1];
+    }
+    temp_centers.pop_back();
+    for (int v = 0; v < nodeNum; ++v) {
+        if (fTable[0][v] == node) {
+            fTable[0][v] = fTable[1][v];
+            dTable[0][v] = dTable[1][v];
+            findNext(v);
+
+        } else if (fTable[1][v] == node) {
+            findNext(v);
+        }
+        if (dTable[0][v] > cur_maxLength)
+            cur_maxLength = dTable[0][v];
+    }
+}
+void Solver::findNext(int v) {
+    int nextNode = -1, secondLength = INT32_MAX;
+    for (int i = 0; i < temp_centers.size(); ++i) {
+        int f = temp_centers[i];//寻找下一个次近服务节点
+        if (f != fTable[0][v] && aux.adjMat[v][f] < secondLength) {
+            secondLength = aux.adjMat[v][f];
+            nextNode = f;
+        }
+    }
+    dTable[1][v] = secondLength;
+    fTable[1][v] = nextNode;
+}
+int Solver::selectNextSeveredNode() {
+    vector<int> kClosedNode = findSeveredNodeNeighbourhood();
+    int serveredNode = kClosedNode[rand.pick(kClosedNode.size())];//从这k个近节点中随机选择一个作为服务节点
+    return serveredNode;
+}
+std::vector<int> Solver::findSeveredNodeNeighbourhood() {
+    int maxServerLength = -1;
+    vector<int> serveredNodes;
+    for (int v = 0; v < nodeNum; ++v) {
+        if (dTable[0][v] > maxServerLength) {
+            serveredNodes.clear();
+            maxServerLength = dTable[0][v];
+            serveredNodes.push_back(v);
+        } else if (dTable[0][v] == maxServerLength) {
+            serveredNodes.push_back(v);
+        }
+    }
+    int serveredNode = serveredNodes[rand.pick(serveredNodes.size())];
+    vector<int> kClosedNode; //备选用户节点v的前k个最近节点
+    kClosedNode = sortIndexes(serveredNode, kClosed, maxServerLength);
+    return kClosedNode;
+}
+std::vector<int> Solver::sortIndexes(int v, int k, int length) {
+    //返回前k个最小值对应的索引值
+    vector<int> temporary(nodeNum, -1);
+    assign_(temporary, v);
+    vector<int> idx(nodeNum);
+    vector<int> res;
+    for (int i = 0; i != idx.size(); ++i) {
+        idx[i] = i;
+    }
+    sort(idx.begin(), idx.end(),
+        [&temporary](int i1, int i2) {return temporary[i1] < temporary[i2]; });
+    for (int i = 0; i < nodeNum && i < k; i++) {
+        if (isServerdNode[idx[i]] || temporary[idx[i]] >= length) {
+            ++k;
+            continue;
+        }
+        //if (temporary[idx[i]] < length)
+            res.push_back(idx[i]);
+    }
+    return res;
+}
+std::vector<int> Solver::findPair(const std::vector<int>& switchNode, int t)
+
+{
+    int tabu_length = INF;//记录禁忌对中最好的函数值
+    int no_tabu_length = INF;//记录非禁忌对中最好的函数值
+    vector<vector<int>> tabu_res;
+    vector<vector<int>> no_tabu_res;
+    vector<int> r;
+    map<int, int> Mf; //t < serverTableTenure[v] && t < userTableTenure[f]
+    for (int i : switchNode) {
+        //isServerdNode[i] = true;
+        Mf.clear();//存放删除某个服务节点f后产生的最长服务边maxlength，key为f value为maxlength
+        for (int j = 0; j < temp_centers.size(); ++j) {
+            Mf[temp_centers[j]] = 0;
+        }
+        for (int v = 0; v < dTable[0].size(); ++v) {
+            if (min(aux.adjMat[i][v], dTable[1][v]) > Mf[fTable[0][v]])
+                Mf[fTable[0][v]] = min(aux.adjMat[i][v], dTable[1][v]);
+        }
+        for (int f = 0; f < temp_centers.size(); f++) {
+            //选出删除f后所产生的最小最长服务边
+            if (facility_tenure[i] > t && user_tenure[temp_centers[f]] > t) {//找出禁忌对中最好的Mf
+                if (Mf[temp_centers[f]] == tabu_length) {
+                    r.clear();
+                    r.push_back(i);
+                    r.push_back(temp_centers[f]);
+                    r.push_back(tabu_length);
+                    tabu_res.push_back(r);
+                } else if (Mf[temp_centers[f]] < tabu_length) {
+                    tabu_length = Mf[temp_centers[f]];
+                    tabu_res.clear();
+                    r.clear();
+                    r.push_back(i);
+                    r.push_back(temp_centers[f]);
+                    r.push_back(tabu_length);
+                    tabu_res.push_back(r);
+                }
+            } else {
+                if (Mf[temp_centers[f]] == no_tabu_length) {//找出非禁忌对中最好Mf
+                    r.clear();
+                    r.push_back(i);
+                    r.push_back(temp_centers[f]);
+                    r.push_back(no_tabu_length);
+                    no_tabu_res.push_back(r);
+                } else if (Mf[temp_centers[f]] < no_tabu_length) {
+                    no_tabu_length = Mf[temp_centers[f]];
+                    no_tabu_res.clear();
+                    r.clear();
+                    r.push_back(i);
+                    r.push_back(temp_centers[f]);
+                    r.push_back(no_tabu_length);
+                    no_tabu_res.push_back(r);
+                }
+            }
+        }
+    }
+    if (tabu_length < hist_maxLength) {
+        if (tabu_res.size() == 0)
+            return vector<int>();
+        else 
+            return tabu_res[rand.pick(tabu_res.size())] ;
+    }
+    else {
+        if (no_tabu_res.size() == 0)
+            return vector<int>();
+        else
+            return no_tabu_res[rand.pick(no_tabu_res.size())];
+    }
+        
+
+}
+void Solver::assign_(std::vector<int>& vec, int adj) {
+    for (int i = 0; i < nodeNum; ++i) {
+        vec[i] = aux.adjMat[adj][i];
+    }
+}
+
 #pragma endregion Solver
 
 }
